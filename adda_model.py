@@ -66,21 +66,24 @@ def collect_vars_new(vars, start=None, end=None):
     return var_dict
 
 #adversarial discriminator
-def adversarial_discriminator(net, layers, scope='adversary', leaky=False):
-    if leaky:
-        activation_fn = tflearn.activations.leaky_relu
-    else:
-        activation_fn = tf.nn.relu
-    with ExitStack() as stack:
-        stack.enter_context(tf.variable_scope(scope))
-        stack.enter_context(
-            slim.arg_scope(
-                [slim.fully_connected],
-                activation_fn=activation_fn,
-                weights_regularizer=slim.l2_regularizer(2.5e-5)))
-        for dim in layers:
-            net = slim.fully_connected(net, dim)
-        net = slim.fully_connected(net, 2, activation_fn=None)
+def adversarial_discriminator(net, layers, scope='adversary', leaky=False, reuse = False):
+    with tf.variable_scope(scope):
+        if reuse:
+            tf.get_variable_scope().reuse_variables()
+        if leaky:
+            activation_fn = tflearn.activations.leaky_relu
+        else:
+            activation_fn = tf.nn.relu
+        with ExitStack() as stack:
+            stack.enter_context(tf.variable_scope(scope))
+            stack.enter_context(
+                slim.arg_scope(
+                    [slim.fully_connected],
+                    activation_fn=activation_fn,
+                    weights_regularizer=slim.l2_regularizer(2.5e-5)))
+            for dim in layers:
+                net = slim.fully_connected(net, dim)
+            net = slim.fully_connected(net, 2, activation_fn=None)
     return net
 
 #global variables for custom_source_next_batch()
@@ -140,15 +143,32 @@ class SolverWrapper(object):
 	source_ft = tf.reshape(source_ft, [-1, int(source_ft.get_shape()[-1])])
 	target_ft = tf.reshape(target_ft, [-1, int(target_ft.get_shape()[-1])])
 	adversary_ft = tf.concat([source_ft, target_ft], 0)
-	source_adversary_label = tf.zeros([tf.shape(source_ft)[0]], tf.int32)
-	target_adversary_label = tf.ones([tf.shape(target_ft)[0]], tf.int32)
-	adversary_label = tf.concat([source_adversary_label, target_adversary_label], 0)
-	adversary_logits = adversarial_discriminator(adversary_ft, [500,500], leaky=True)
-	print('CheckPoint2: Adversarial Network Formed!')
+	#source_adversary_label = tf.zeros([tf.shape(source_ft)[0]], tf.int32)
+	#target_adversary_label = tf.ones([tf.shape(target_ft)[0]], tf.int32)
+	#adversary_label = tf.concat([source_adversary_label, target_adversary_label], 0)
+	#adversary_logits = adversarial_discriminator(adversary_ft, [500,500], leaky=True)
+	
+        D_logits = adversarial_discriminator(source_ft, [500, 500], leaky=True, reuse=False)  # source logits (real)
+        D_logits_ = adversarial_discriminator(target_ft, [500, 500], leaky=True, reuse=True)  # target logits (fake)
+
+        # discriminator losses
+
+        d_loss_real = tf.reduce_mean(
+            tf.nn.sigmoid_cross_entropy_with_logits(logits=D_logits, labels=tf.ones_like(D_logits)))
+        d_loss_fake = tf.reduce_mean(
+            tf.nn.sigmoid_cross_entropy_with_logits(logits=D_logits_, labels=tf.zeros_like(D_logits_)))
+        d_loss = d_loss_real + d_loss_fake
+
+        # generator losses: in our case target RCNN losses
+
+        target_loss = tf.reduce_mean(
+            tf.nn.sigmoid_cross_entropy_with_logits(logits=D_logits_, labels=tf.ones_like(D_logits_)))
+
+        print('CheckPoint2: Adversarial Network Formed!')
 
 	# losses
-	mapping_loss = tf.losses.sparse_softmax_cross_entropy(1 - adversary_label, adversary_logits)
-	adversary_loss = tf.losses.sparse_softmax_cross_entropy(adversary_label, adversary_logits)	
+	#mapping_loss = tf.losses.sparse_softmax_cross_entropy(1 - adversary_label, adversary_logits)
+	#adversary_loss = tf.losses.sparse_softmax_cross_entropy(adversary_label, adversary_logits)	
 	print('CheckPoint3: Loss Operations Formed!')
 
 	# variable collection
@@ -160,23 +180,24 @@ class SolverWrapper(object):
 	lr = 0.0002
 	lr_var = tf.Variable(lr, name='learning_rate', trainable=False)
 	optimizer = tf.train.AdamOptimizer(lr_var, 0.5)
-	mapping_step = optimizer.minimize(mapping_loss, var_list=list(target_vars.values()))
-	adversary_step = optimizer.minimize(adversary_loss, var_list=list(adversary_vars.values()))
-	print('CheckPoint5: Optimizer Declaration Done!')
+	discriminator_step = optimizer.minimize(d_loss, var_list=list(adversary_vars.values()))
+       	target_step = optimizer.minimize(target_loss, var_list=list(target_vars.values()))
+
+ 	print('CheckPoint5: Optimizer Declaration Done!')
 
 
 	# optimization loop (finally)
 	output_dir = os.path.join('snapshot/')
 	if not os.path.exists(output_dir):
 		os.mkdir(output_dir)
-	mapping_losses = deque(maxlen=10)
-	adversary_losses = deque(maxlen=10)
+	target_losses = deque(maxlen=10)
+	disc_losses = deque(maxlen=10)
 
         # iintialize variables
         sess.run(tf.global_variables_initializer())
         timer = Timer()
-	snapping_iters = 50
-	display_iters = 5
+	snapping_iters = 500
+	display_iters = 1
         for i in range(max_iters):
 
             # get one batch
@@ -184,21 +205,28 @@ class SolverWrapper(object):
             x=custom_source_next_batch()
 	    feed_dict={source_ft: x, self.net.data: blobs['data'], self.net.im_info: blobs['im_info'], self.net.keep_prob: 0.5, \
                            self.net.gt_boxes: blobs['gt_boxes']}
-            mapping_loss_val, adversary_loss_val, _, _ = sess.run([mapping_loss, adversary_loss, mapping_step, adversary_step],         		feed_dict = feed_dict)
+            print("will start training::")
+            # Update the discriminator
+            disc_loss_val, _ = sess.run([d_loss, discriminator_step], feed_dict = feed_dict)
+            print("Disc trained")
+            # Update the target generator 
+            target_loss_val, _ = sess.run([target_loss, target_step], feed_dict = feed_dict)
 
-	    mapping_losses.append(mapping_loss_val)
-	    adversary_losses.append(adversary_loss_val)
+	    target_losses.append(target_loss_val)
+	    disc_losses.append(disc_loss_val)
+	    f=open('losses.txt','a')
 	    if i % display_iters == 0:
-			print('{:} Mapping: {:10.4f}     (avg: {:10.4f})'
-                        '    Adversary: {:10.4f}     (avg: {:10.4f})'
+			print >>f, ('{:} Target: {:10.4f}     (avg: {:10.4f})'
+                        '    Disc: {:10.4f}     (avg: {:10.4f})'
                         .format('Iteration {}:'.format(i),
-                                mapping_loss_val,
-                                np.mean(mapping_losses),
-                                adversary_loss_val,
-                                np.mean(adversary_losses)))
+                                target_loss_val,
+                                np.mean(target_losses),
+                                disc_loss_val,
+                                np.mean(disc_losses)))
 	    if (i + 1) % snapping_iters == 0:
 			snapshot_path = saver.save(sess, os.path.join(output_dir, 'yto'), global_step=i + 1)
 			print('Saved snapshot to {}'.format(snapshot_path))
+	    f.close()
 	coord.request_stop()
 	coord.join(threads)
 	sess.close()

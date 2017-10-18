@@ -33,7 +33,7 @@ import tensorflow as tf
 
 
 #Command to Run
-#python train_youtube_adda.py --device gpu --device_id 0 --weights /home/charan/target_rcnn/VGGnet_fast_rcnn_iter_1000.ckpt --imdb yto_trainval --iters 1 --cfg /home/charan/oldFaster-RCNN_TF/experiments/cfgs/faster_rcnn_end2end.yml --network VGGnet_train_target
+#python train_youtube_adda.py --device gpu --device_id 0 --weights /home/charan/target_rcnn/VGGnet_fast_rcnn_iter_24000.ckpt --imdb yto_trainval --iters 1 --cfg /home/charan/Faster-RCNN_TF/experiments/cfgs/faster_rcnn_end2end.yml --network VGGnet_train
 
 
 def parse_args():
